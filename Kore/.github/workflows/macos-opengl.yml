@@ -1,0 +1,21 @@
+name: macOS (OpenGL)
+
+on:
+  push:
+    branches:
+    - v2
+  pull_request:
+    branches:
+    - v2
+
+jobs:
+  build:
+
+    runs-on: macOS-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    - name: Get Submodules
+      run: ./get_dlc
+    - name: Compile
+      run: ./make -g opengl --kore . --from Tests/Empty --compile

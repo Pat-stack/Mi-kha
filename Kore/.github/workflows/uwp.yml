@@ -1,0 +1,21 @@
+name: UWP
+
+on:
+  push:
+    branches:
+    - v2
+  pull_request:
+    branches:
+    - v2
+
+jobs:
+  build:
+
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    - name: Get Submodules
+      run: .\get_dlc.bat
+    - name: Compile
+      run: .\make.bat windowsapp -v vs2022 --kore . --from Tests/Empty --compile

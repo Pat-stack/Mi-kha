@@ -127,7 +127,6 @@ class SystemImpl {
 	public static function init(options: SystemOptions, callback: Window->Void): Void {
 		initKinc(options.title, options.width, options.height, options.window, options.framebuffer);
 		Window._init();
-
 		kha.Worker._mainThread = sys.thread.Thread.current();
 
 		untyped __cpp__("post_kinc_init()");

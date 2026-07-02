@@ -1,0 +1,45 @@
+name: Linux (OpenGL)
+
+on:
+  push:
+    branches:
+    - v2
+  pull_request:
+    branches:
+    - v2
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Apt Update
+      run: sudo apt update
+    - name: Apt Install
+      run: sudo apt-get install libasound2-dev libxinerama-dev libxrandr-dev libgl1-mesa-dev libxi-dev libxcursor-dev libudev-dev libwayland-dev wayland-protocols libxkbcommon-dev ninja-build --yes --quiet
+    - name: Get Submodules
+      run: ./get_dlc
+    - name: Compile
+      run: ./make -g opengl --kore . --from Tests/Empty --compile
+    - name: Clean
+      run: rm -r build
+    - name: Get ImageMagick and xvfb
+      run: sudo apt install imagemagick xvfb
+    - name: Compile Test 1
+      run: ./make -g opengl --kore . --from Tests/Shader --compile
+    - name: Copy Test 1
+      run: cp build/release/ShaderTest Tests/Shader/Deployment/ShaderTest
+    - name: Run Test 1
+      working-directory: ./Tests/Shader/Deployment
+      run: xvfb-run ./ShaderTest
+    - name: Check Test 1
+      run: compare-im6 -metric mae Tests/Shader/reference.png Tests/Shader/Deployment/test.png difference.png
+    - name: Compile Test 2 (SIMD)
+      run: ./make -g opengl --kore . --from Tests/SIMD --compile
+    - name: Copy Test 2
+      run: cp build/release/SIMD Tests/SIMD/Deployment/SIMD
+    - name: Run Test 2
+      working-directory: ./Tests/SIMD/Deployment
+      run: ./SIMD
