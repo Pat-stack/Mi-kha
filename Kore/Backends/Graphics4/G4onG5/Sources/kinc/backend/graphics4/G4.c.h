@@ -649,10 +649,26 @@ void kinc_g4_set_texture_lod(kinc_g4_texture_unit_t unit, float lod_min_clamp, f
 
 void kinc_g4_set_cubemap_lod(kinc_g4_texture_unit_t unit, float lod_min_clamp, float lod_max_clamp) {}
 
+// the g5-backend can drop the texture-bindings when the render target changes (the Vulkan backend
+// clears them at the end of every render pass), so restore them from the tracked state
+static void reapply_textures(void) {
+	for (int i = 0; i < current_state.texture_count; ++i) {
+		kinc_g5_command_list_set_texture(&commandList, current_state.texture_units[i], current_state.textures[i]);
+	}
+	for (int i = 0; i < current_state.render_target_count; ++i) {
+		kinc_g5_command_list_set_texture_from_render_target(&commandList, current_state.render_target_units[i], current_state.render_targets[i]);
+	}
+	for (int i = 0; i < current_state.depth_render_target_count; ++i) {
+		kinc_g5_command_list_set_texture_from_render_target_depth(&commandList, current_state.depth_render_target_units[i],
+		                                                          current_state.depth_render_targets[i]);
+	}
+}
+
 void kinc_g4_restore_render_target(void) {
 	kinc_g4_on_g5_internal_restore_render_target();
 	current_state.viewport_set = false;
 	current_state.scissor_set = false;
+	reapply_textures();
 }
 
 void kinc_g4_set_render_targets(kinc_g4_render_target_t **targets, int count) {
@@ -672,6 +688,7 @@ void kinc_g4_set_render_targets(kinc_g4_render_target_t **targets, int count) {
 	kinc_g5_command_list_set_render_targets(&commandList, render_targets, count);
 	current_state.viewport_set = false;
 	current_state.scissor_set = false;
+	reapply_textures();
 }
 
 void kinc_g4_set_render_target_face(kinc_g4_render_target_t *texture, int face) {

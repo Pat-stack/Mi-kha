@@ -389,7 +389,9 @@ void create_swapchain(int window_index) {
 	VkAttachmentDescription attachments[2];
 	attachments[0].format = window->format.format;
 	attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-	attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	// LOAD instead of DONT_CARE so the empty pass recorded between kinc_g4_end and kinc_g4_begin
+	// can not trash the image that is still being presented
+	attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 	attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -494,17 +496,20 @@ void create_render_target_render_pass(struct vk_window *window) {
 	VkAttachmentDescription attachments[2];
 	attachments[0].format = VK_FORMAT_B8G8R8A8_UNORM; // target->impl.format; // TODO
 	attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-	attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	// render targets are kept in VK_IMAGE_LAYOUT_GENERAL and loaded (not discarded) on every pass
+	// so their contents persist across passes like they do in OpenGL - G2 and games rely on that.
+	// GENERAL also matches the imageLayout the sampling-descriptors declare.
+	attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 	attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	attachments[0].initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+	attachments[0].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
 	attachments[0].flags = 0;
 
 	VkAttachmentReference color_reference = {0};
 	color_reference.attachment = 0;
-	color_reference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	color_reference.layout = VK_IMAGE_LAYOUT_GENERAL;
 
 	VkSubpassDescription subpass = {0};
 	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -554,7 +559,7 @@ void create_render_target_render_pass(struct vk_window *window) {
 	// depthBufferBits > 0
 	attachments[1].format = VK_FORMAT_D16_UNORM;
 	attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-	attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 	attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;

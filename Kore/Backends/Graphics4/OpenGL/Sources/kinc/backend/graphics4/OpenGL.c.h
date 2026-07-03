@@ -162,6 +162,16 @@ void kinc_egl_destroy_window(int window);
 	}
 #endif
 
+#ifdef KINC_GLX
+// implemented in the Linux backend (x11/glcontext.c.h)
+void kinc_glx_init(void);
+void kinc_glx_init_window(int window, bool vsync);
+void kinc_glx_destroy_window(int window);
+void kinc_glx_destroy(void);
+void kinc_glx_make_current(int window);
+bool kinc_glx_swap_buffers(void);
+#endif
+
 void kinc_g4_internal_destroy() {
 #ifdef KINC_EGL
 	if (egl_display != EGL_NO_DISPLAY) {
@@ -181,11 +191,17 @@ void kinc_g4_internal_destroy() {
 
 	egl_display = EGL_NO_DISPLAY;
 #endif
+#ifdef KINC_GLX
+	kinc_glx_destroy();
+#endif
 }
 
 void kinc_g4_internal_destroy_window(int window) {
 #ifdef KINC_EGL
 	kinc_egl_destroy_window(window);
+#endif
+#ifdef KINC_GLX
+	kinc_glx_destroy_window(window);
 #endif
 #ifdef KINC_WINDOWS
 	if (Kinc_Internal_windows[window].glContext) {
@@ -215,6 +231,9 @@ void kinc_g4_internal_init() {
 	eglBindAPI(EGL_OPENGL_ES_API);
 #endif
 	kinc_egl_init();
+#endif
+#ifdef KINC_GLX
+	kinc_glx_init();
 #endif
 
 #ifndef VR_RIFT
@@ -248,6 +267,9 @@ void kinc_g4_internal_init_window(int windowId, int depthBufferBits, int stencil
 #endif
 #ifdef KINC_EGL
 	kinc_egl_init_window(windowId);
+#endif
+#ifdef KINC_GLX
+	kinc_glx_init_window(windowId, vsync);
 #endif
 
 #ifdef KINC_WINDOWS
@@ -697,6 +719,10 @@ bool kinc_g4_swap_buffers() {
 			EGL_CHECK_ERROR()
 		}
 	}
+#elif defined(KINC_GLX)
+	if (!kinc_glx_swap_buffers()) {
+		return false;
+	}
 #elif defined(KINC_MACOS)
 	swapBuffersMac(0);
 #elif defined(KINC_IOS)
@@ -717,6 +743,9 @@ void kinc_g4_begin(int window) {
 #ifdef KINC_EGL
 	eglMakeCurrent(egl_display, kinc_egl_windows[window].surface, kinc_egl_windows[window].surface, egl_context);
 	EGL_CHECK_ERROR()
+#endif
+#ifdef KINC_GLX
+	kinc_glx_make_current(window);
 #endif
 #ifdef KINC_IOS
 	beginGL();

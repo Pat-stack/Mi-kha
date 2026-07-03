@@ -110,6 +110,7 @@ struct kinc_x11_procs {
 	int (*XGetErrorText)(Display *, int, char *, int);
 	int (*XPending)(Display *display);
 	int (*XFlush)(Display *display);
+	int (*XSync)(Display *display, Bool discard);
 	int (*XNextEvent)(Display *display, XEvent *event_return);
 	int (*XPeekEvent)(Display *display, XEvent *event_return);
 	int (*XRefreshKeyboardMapping)(XMappingEvent *event_map);

@@ -32,6 +32,9 @@ static void load_lib(void **lib, const char *name) {
 #include "x11/display.c.h"
 #include "x11/system.c.h"
 #include "x11/window.c.h"
+#ifdef KINC_GLX
+#include "x11/glcontext.c.h"
+#endif
 #endif
 
 struct linux_procs procs = {0};

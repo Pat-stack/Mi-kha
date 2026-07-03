@@ -471,8 +471,10 @@ else if (platform === Platform.Linux || platform === Platform.FreeBSD) {
 		project.addExclude('Backends/Graphics4/OpenGL/Sources/GL/glew.c');
 		project.addLib('GL');
 		addKincDefine('OPENGL');
-		project.addLib('EGL');
-		project.addDefine('KINC_EGL');
+		// GLX instead of EGL so the Steam overlay and RenderDoc can hook the GL calls;
+		// GLX needs X11, so the Wayland backend is disabled (Wayland sessions run through XWayland)
+		project.addDefine('KINC_GLX');
+		project.addDefine('KINC_NO_WAYLAND');
 	}
 	else {
 		throw new Error('Graphics API ' + graphics + ' is not available for Linux.');

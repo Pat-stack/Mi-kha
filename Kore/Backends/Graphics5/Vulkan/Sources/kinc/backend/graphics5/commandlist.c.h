@@ -375,7 +375,8 @@ void kinc_g5_command_list_clear(kinc_g5_command_list_t *list, struct kinc_g5_ren
 	}
 	if (((flags & KINC_G5_CLEAR_DEPTH) || (flags & KINC_G5_CLEAR_STENCIL)) && renderTarget->impl.depthBufferBits > 0) {
 		attachments[count].aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT; // | VK_IMAGE_ASPECT_STENCIL_BIT;
-		attachments[count].clearValue.depthStencil.depth = depth;
+		// glClearDepth clamps to [0, 1] in OpenGL, Vulkan considers values outside that range invalid
+		attachments[count].clearValue.depthStencil.depth = depth < 0.0f ? 0.0f : (depth > 1.0f ? 1.0f : depth);
 		attachments[count].clearValue.depthStencil.stencil = stencil;
 		count++;
 	}
@@ -593,23 +594,25 @@ void kinc_g5_command_list_set_render_targets(kinc_g5_command_list_t *list, struc
 		for (int i = 0; i < count; ++i) {
 			attachments[i].format = targets[i]->impl.format;
 			attachments[i].samples = VK_SAMPLE_COUNT_1_BIT;
-			attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			// keep render targets in VK_IMAGE_LAYOUT_GENERAL and preserve their contents across passes,
+			// matching the single-target render passes and the sampling-descriptors
+			attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 			attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 			attachments[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			attachments[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			attachments[i].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-			attachments[i].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			attachments[i].initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+			attachments[i].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
 			attachments[i].flags = 0;
 		}
 
 		if (targets[0]->impl.depthBufferBits > 0) {
 			attachments[count].format = VK_FORMAT_D16_UNORM;
 			attachments[count].samples = VK_SAMPLE_COUNT_1_BIT;
-			attachments[count].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			attachments[count].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 			attachments[count].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 			attachments[count].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			attachments[count].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			attachments[count].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			attachments[count].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 			attachments[count].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 			attachments[count].flags = 0;
 		}
@@ -617,7 +620,7 @@ void kinc_g5_command_list_set_render_targets(kinc_g5_command_list_t *list, struc
 		VkAttachmentReference color_references[8];
 		for (int i = 0; i < count; ++i) {
 			color_references[i].attachment = i;
-			color_references[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+			color_references[i].layout = VK_IMAGE_LAYOUT_GENERAL;
 		}
 
 		VkAttachmentReference depth_reference = {0};
@@ -761,7 +764,7 @@ void kinc_g5_command_list_get_render_target_pixels(kinc_g5_command_list_t *list,
 	}
 
 	vkCmdEndRenderPass(list->impl._buffer);
-	setImageLayout(list->impl._buffer, render_target->impl.sourceImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+	setImageLayout(list->impl._buffer, render_target->impl.sourceImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL,
 	               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
 	VkBufferImageCopy region;
@@ -782,7 +785,7 @@ void kinc_g5_command_list_get_render_target_pixels(kinc_g5_command_list_t *list,
 	                       &region);
 
 	setImageLayout(list->impl._buffer, render_target->impl.sourceImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-	               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	               VK_IMAGE_LAYOUT_GENERAL);
 	vkCmdBeginRenderPass(list->impl._buffer, &currentRenderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 	in_render_pass = true;
 
@@ -875,8 +878,10 @@ void kinc_g5_command_list_wait_for_execution_to_finish(kinc_g5_command_list_t *l
 }
 
 void kinc_g5_command_list_set_texture(kinc_g5_command_list_t *list, kinc_g5_texture_unit_t unit, kinc_g5_texture_t *texture) {
-	vulkanTextures[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = texture;
-	vulkanRenderTargets[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = NULL;
+	if (unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT] >= 0) {
+		vulkanTextures[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = texture;
+		vulkanRenderTargets[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = NULL;
+	}
 }
 
 void kinc_g5_command_list_set_sampler(kinc_g5_command_list_t *list, kinc_g5_texture_unit_t unit, kinc_g5_sampler_t *sampler) {
@@ -886,8 +891,10 @@ void kinc_g5_command_list_set_sampler(kinc_g5_command_list_t *list, kinc_g5_text
 }
 
 void kinc_g5_command_list_set_image_texture(kinc_g5_command_list_t *list, kinc_g5_texture_unit_t unit, kinc_g5_texture_t *texture) {
-	vulkanTextures[unit.stages[KINC_G5_SHADER_TYPE_COMPUTE]] = texture;
-	vulkanRenderTargets[unit.stages[KINC_G5_SHADER_TYPE_COMPUTE]] = NULL;
+	if (unit.stages[KINC_G5_SHADER_TYPE_COMPUTE] >= 0) {
+		vulkanTextures[unit.stages[KINC_G5_SHADER_TYPE_COMPUTE]] = texture;
+		vulkanRenderTargets[unit.stages[KINC_G5_SHADER_TYPE_COMPUTE]] = NULL;
+	}
 }
 
 void kinc_g5_command_list_set_render_target_face(kinc_g5_command_list_t *list, kinc_g5_render_target_t *texture, int face) {}
@@ -907,15 +914,19 @@ bool kinc_g5_command_list_are_query_results_available(kinc_g5_command_list_t *li
 void kinc_g5_command_list_get_query_result(kinc_g5_command_list_t *list, unsigned occlusionQuery, unsigned *pixelCount) {}
 
 void kinc_g5_command_list_set_texture_from_render_target(kinc_g5_command_list_t *list, kinc_g5_texture_unit_t unit, kinc_g5_render_target_t *target) {
-	target->impl.stage = unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT];
-	vulkanRenderTargets[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = target;
-	vulkanTextures[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = NULL;
+	if (unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT] >= 0) {
+		target->impl.stage = unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT];
+		vulkanRenderTargets[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = target;
+		vulkanTextures[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = NULL;
+	}
 }
 
 void kinc_g5_command_list_set_texture_from_render_target_depth(kinc_g5_command_list_t *list, kinc_g5_texture_unit_t unit, kinc_g5_render_target_t *target) {
-	target->impl.stage_depth = unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT];
-	vulkanRenderTargets[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = target;
-	vulkanTextures[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = NULL;
+	if (unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT] >= 0) {
+		target->impl.stage_depth = unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT];
+		vulkanRenderTargets[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = target;
+		vulkanTextures[unit.stages[KINC_G5_SHADER_TYPE_FRAGMENT]] = NULL;
+	}
 }
 
 void kinc_g5_command_list_set_compute_shader(kinc_g5_command_list_t *list, kinc_g5_compute_shader *shader) {

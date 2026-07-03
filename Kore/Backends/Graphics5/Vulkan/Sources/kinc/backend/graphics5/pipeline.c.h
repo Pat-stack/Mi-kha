@@ -2,6 +2,7 @@
 
 #include <kinc/graphics5/pipeline.h>
 #include <kinc/graphics5/shader.h>
+#include <kinc/log.h>
 #include <vulkan/vulkan_core.h>
 
 #include <assert.h>
@@ -217,6 +218,112 @@ static void parse_shader(uint32_t *shader_source, int shader_length, kinc_intern
 	}
 }
 
+static kinc_g5_vertex_element_t *find_input_element(kinc_g5_pipeline_t *pipeline, const char *name) {
+	for (int binding = 0; binding < 16 && pipeline->inputLayout[binding] != NULL; ++binding) {
+		for (int i = 0; i < pipeline->inputLayout[binding]->size; ++i) {
+			if (strcmp(pipeline->inputLayout[binding]->elements[i].name, name) == 0) {
+				return &pipeline->inputLayout[binding]->elements[i];
+			}
+		}
+	}
+	return NULL;
+}
+
+// krafix assigns vertex-input locations counting every input as a single slot, but a mat4 input
+// consumes four consecutive locations, so the inputs that follow one can land on the columns of
+// the matrix. Reassign the locations reserving four slots per mat4 and patch the decorations in
+// the SPIR-V (impl.source is the shader's own copy) so the shader and the vertex attributes agree.
+static void fix_mat4_input_locations(kinc_g5_pipeline_t *pipeline) {
+	bool has_mat4 = false;
+	for (int binding = 0; binding < 16 && pipeline->inputLayout[binding] != NULL; ++binding) {
+		for (int i = 0; i < pipeline->inputLayout[binding]->size; ++i) {
+			if (pipeline->inputLayout[binding]->elements[i].data == KINC_G4_VERTEX_DATA_F32_4X4) {
+				has_mat4 = true;
+			}
+		}
+	}
+	if (!has_mat4) {
+		return;
+	}
+
+	uint32_t *spirv = (uint32_t *)pipeline->vertexShader->impl.source;
+	int spirvsize = pipeline->vertexShader->impl.length / 4;
+
+	struct indexed_name input_names[MAX_THINGS];
+	uint32_t input_names_size = 0;
+
+	struct spirv_input {
+		char *name;
+		uint32_t location;
+		int literal_index;
+		bool is_mat4;
+	};
+	struct spirv_input inputs[MAX_THINGS];
+	int input_count = 0;
+
+	int index = 5;
+	while (index < spirvsize) {
+		uint16_t wordCount = (uint16_t)(spirv[index] >> 16);
+		uint32_t opcode = spirv[index] & 0xffff;
+		uint32_t *operands = wordCount > 1 ? &spirv[index + 1] : NULL;
+
+		if (opcode == 5 && wordCount >= 3 && input_names_size < MAX_THINGS) { // OpName
+			input_names[input_names_size].id = operands[0];
+			input_names[input_names_size].name = (char *)&operands[1];
+			++input_names_size;
+		}
+
+		index += wordCount;
+	}
+
+	index = 5;
+	while (index < spirvsize) {
+		uint16_t wordCount = (uint16_t)(spirv[index] >> 16);
+		uint32_t opcode = spirv[index] & 0xffff;
+		uint32_t *operands = wordCount > 1 ? &spirv[index + 1] : NULL;
+
+		if (opcode == 71 && wordCount >= 4 && operands[1] == 30) { // OpDecorate ... Location
+			char *name = NULL;
+			for (uint32_t i = 0; i < input_names_size; ++i) {
+				if (input_names[i].id == operands[0]) {
+					name = input_names[i].name;
+					break;
+				}
+			}
+			kinc_g5_vertex_element_t *element = name != NULL ? find_input_element(pipeline, name) : NULL;
+			if (element != NULL && input_count < MAX_THINGS) {
+				inputs[input_count].name = name;
+				inputs[input_count].location = operands[2];
+				inputs[input_count].literal_index = index + 3;
+				inputs[input_count].is_mat4 = element->data == KINC_G4_VERTEX_DATA_F32_4X4;
+				++input_count;
+			}
+		}
+
+		index += wordCount;
+	}
+
+	// reassign in the order krafix chose so only the slot widths change
+	for (int i = 1; i < input_count; ++i) {
+		for (int j = i; j > 0 && inputs[j - 1].location > inputs[j].location; --j) {
+			struct spirv_input temp = inputs[j - 1];
+			inputs[j - 1] = inputs[j];
+			inputs[j] = temp;
+		}
+	}
+
+	uint32_t next_location = 0;
+	for (int i = 0; i < input_count; ++i) {
+		if (inputs[i].location != next_location) {
+			kinc_log(KINC_LOG_LEVEL_WARNING, "Vertex input %s remapped from location %u to %u to make room for a mat4", inputs[i].name, inputs[i].location,
+			         next_location);
+			spirv[inputs[i].literal_index] = next_location;
+			set_number(pipeline->impl.vertexLocations, inputs[i].name, next_location);
+		}
+		next_location += inputs[i].is_mat4 ? 4 : 1;
+	}
+}
+
 static VkShaderModule create_shader_module(const void *code, size_t size) {
 	VkShaderModuleCreateInfo moduleCreateInfo;
 	moduleCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -394,6 +501,7 @@ void kinc_g5_pipeline_compile(kinc_g5_pipeline_t *pipeline) {
 	             pipeline->impl.textureBindings, pipeline->impl.vertexOffsets);
 	parse_shader((uint32_t *)pipeline->fragmentShader->impl.source, pipeline->fragmentShader->impl.length, pipeline->impl.fragmentLocations,
 	             pipeline->impl.textureBindings, pipeline->impl.fragmentOffsets);
+	fix_mat4_input_locations(pipeline);
 
 	VkPipelineLayoutCreateInfo pPipelineLayoutCreateInfo = {0};
 	pPipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -431,7 +539,10 @@ void kinc_g5_pipeline_compile(kinc_g5_pipeline_t *pipeline) {
 		if (pipeline->inputLayout[i] == NULL) {
 			break;
 		}
-		vertexAttributeCount += pipeline->inputLayout[i]->size;
+		for (int i2 = 0; i2 < pipeline->inputLayout[i]->size; ++i2) {
+			// a 4x4 matrix consumes four attribute slots
+			vertexAttributeCount += pipeline->inputLayout[i]->elements[i2].data == KINC_G4_VERTEX_DATA_F32_4X4 ? 4 : 1;
+		}
 		vertexBindingCount++;
 	}
 
@@ -451,7 +562,6 @@ void kinc_g5_pipeline_compile(kinc_g5_pipeline_t *pipeline) {
 	vi.pNext = NULL;
 	vi.vertexBindingDescriptionCount = vertexBindingCount;
 	vi.pVertexBindingDescriptions = vi_bindings;
-	vi.vertexAttributeDescriptionCount = vertexAttributeCount;
 	vi.pVertexAttributeDescriptions = vi_attrs;
 
 	uint32_t attr = 0;
@@ -461,8 +571,33 @@ void kinc_g5_pipeline_compile(kinc_g5_pipeline_t *pipeline) {
 		for (int i = 0; i < pipeline->inputLayout[binding]->size; ++i) {
 			kinc_g5_vertex_element_t element = pipeline->inputLayout[binding]->elements[i];
 
+			uint32_t location = find_number(pipeline->impl.vertexLocations, element.name);
+			if (location == (uint32_t)-1) {
+				// the vertex shader does not consume this input (not present in the SPIR-V), skip the attribute
+				// but keep advancing offset and stride so the remaining attributes stay aligned with the buffer layout
+				kinc_log(KINC_LOG_LEVEL_WARNING, "Vertex attribute %s not found in the vertex shader, skipping it", element.name);
+				offset += kinc_g4_vertex_data_size(element.data);
+				stride += kinc_g4_vertex_data_size(element.data);
+				continue;
+			}
+
+			if (element.data == KINC_G4_VERTEX_DATA_F32_4X4) {
+				// Vulkan has no mat4 vertex format, a mat4 input occupies four consecutive locations in the SPIR-V,
+				// so provide it as four vec4 attributes
+				for (int column = 0; column < 4; ++column) {
+					vi_attrs[attr].binding = binding;
+					vi_attrs[attr].location = location + column;
+					vi_attrs[attr].offset = offset + column * 4 * 4;
+					vi_attrs[attr].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+					attr++;
+				}
+				offset += kinc_g4_vertex_data_size(element.data);
+				stride += kinc_g4_vertex_data_size(element.data);
+				continue;
+			}
+
 			vi_attrs[attr].binding = binding;
-			vi_attrs[attr].location = find_number(pipeline->impl.vertexLocations, element.name);
+			vi_attrs[attr].location = location;
 			vi_attrs[attr].offset = offset;
 			offset += kinc_g4_vertex_data_size(element.data);
 			stride += kinc_g4_vertex_data_size(element.data);
@@ -586,6 +721,7 @@ void kinc_g5_pipeline_compile(kinc_g5_pipeline_t *pipeline) {
 		vi_bindings[binding].stride = stride;
 		vi_bindings[binding].inputRate = pipeline->inputLayout[binding]->instanced ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
 	}
+	vi.vertexAttributeDescriptionCount = attr;
 
 	memset(&ia, 0, sizeof(ia));
 	ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -821,22 +957,27 @@ static bool textures_changed(struct destriptor_set *set) {
 static void update_textures(struct destriptor_set *set) {
 	memset(&set->tex_desc, 0, sizeof(set->tex_desc));
 
-	int texture_count = write_tex_descs(set->tex_desc);
+	write_tex_descs(set->tex_desc);
 
 	VkWriteDescriptorSet writes[16];
 	memset(&writes, 0, sizeof(writes));
 
+	// only write the occupied texture-slots, at their actual bindings - the slots are not necessarily contiguous
+	int write_count = 0;
 	for (int i = 0; i < 16; ++i) {
-		writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[i].dstSet = set->set;
-		writes[i].dstBinding = i + 2;
-		writes[i].descriptorCount = 1;
-		writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		writes[i].pImageInfo = &set->tex_desc[i];
+		if (vulkanTextures[i] != NULL || vulkanRenderTargets[i] != NULL) {
+			writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writes[write_count].dstSet = set->set;
+			writes[write_count].dstBinding = i + 2;
+			writes[write_count].descriptorCount = 1;
+			writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			writes[write_count].pImageInfo = &set->tex_desc[i];
+			++write_count;
+		}
 	}
 
-	if (vulkanTextures[0] != NULL || vulkanRenderTargets[0] != NULL) {
-		vkUpdateDescriptorSets(vk_ctx.device, texture_count, writes, 0, NULL);
+	if (write_count > 0) {
+		vkUpdateDescriptorSets(vk_ctx.device, write_count, writes, 0, NULL);
 	}
 }
 
@@ -892,13 +1033,11 @@ VkDescriptorSet getDescriptorSet() {
 	VkDescriptorImageInfo tex_desc[16];
 	memset(&tex_desc, 0, sizeof(tex_desc));
 
-	int texture_count = 0;
 	for (int i = 0; i < 16; ++i) {
 		if (vulkanTextures[i] != NULL) {
 			assert(vulkanSamplers[i] != VK_NULL_HANDLE);
 			tex_desc[i].sampler = vulkanSamplers[i];
 			tex_desc[i].imageView = vulkanTextures[i]->impl.texture.view;
-			texture_count++;
 		}
 		else if (vulkanRenderTargets[i] != NULL) {
 			tex_desc[i].sampler = vulkanSamplers[i];
@@ -909,7 +1048,6 @@ VkDescriptorSet getDescriptorSet() {
 			else {
 				tex_desc[i].imageView = vulkanRenderTargets[i]->impl.sourceView;
 			}
-			texture_count++;
 		}
 		tex_desc[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 	}
@@ -917,41 +1055,41 @@ VkDescriptorSet getDescriptorSet() {
 	VkWriteDescriptorSet writes[18];
 	memset(&writes, 0, sizeof(writes));
 
-	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[0].dstSet = descriptor_set;
-	writes[0].dstBinding = 0;
-	writes[0].descriptorCount = 1;
-	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
-	writes[0].pBufferInfo = &buffer_descs[0];
+	int write_count = 0;
 
-	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[1].dstSet = descriptor_set;
-	writes[1].dstBinding = 1;
-	writes[1].descriptorCount = 1;
-	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
-	writes[1].pBufferInfo = &buffer_descs[1];
+	if (vk_ctx.vertex_uniform_buffer != NULL && vk_ctx.fragment_uniform_buffer != NULL) {
+		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[0].dstSet = descriptor_set;
+		writes[0].dstBinding = 0;
+		writes[0].descriptorCount = 1;
+		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+		writes[0].pBufferInfo = &buffer_descs[0];
 
-	for (int i = 2; i < 18; ++i) {
-		writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[i].dstSet = descriptor_set;
-		writes[i].dstBinding = i;
-		writes[i].descriptorCount = 1;
-		writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		writes[i].pImageInfo = &tex_desc[i - 2];
+		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[1].dstSet = descriptor_set;
+		writes[1].dstBinding = 1;
+		writes[1].descriptorCount = 1;
+		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+		writes[1].pBufferInfo = &buffer_descs[1];
+
+		write_count = 2;
 	}
 
-	if (vulkanTextures[0] != NULL || vulkanRenderTargets[0] != NULL) {
-		if (vk_ctx.vertex_uniform_buffer != NULL && vk_ctx.fragment_uniform_buffer != NULL) {
-			vkUpdateDescriptorSets(vk_ctx.device, 2 + texture_count, writes, 0, NULL);
-		}
-		else {
-			vkUpdateDescriptorSets(vk_ctx.device, texture_count, writes + 2, 0, NULL);
+	// only write the occupied texture-slots, at their actual bindings - the slots are not necessarily contiguous
+	for (int i = 0; i < 16; ++i) {
+		if (vulkanTextures[i] != NULL || vulkanRenderTargets[i] != NULL) {
+			writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writes[write_count].dstSet = descriptor_set;
+			writes[write_count].dstBinding = i + 2;
+			writes[write_count].descriptorCount = 1;
+			writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			writes[write_count].pImageInfo = &tex_desc[i];
+			++write_count;
 		}
 	}
-	else {
-		if (vk_ctx.vertex_uniform_buffer != NULL && vk_ctx.fragment_uniform_buffer != NULL) {
-			vkUpdateDescriptorSets(vk_ctx.device, 2, writes, 0, NULL);
-		}
+
+	if (write_count > 0) {
+		vkUpdateDescriptorSets(vk_ctx.device, write_count, writes, 0, NULL);
 	}
 
 	assert(descriptor_sets_count + 1 < MAX_DESCRIPTOR_SETS);
@@ -1004,22 +1142,27 @@ static bool compute_textures_changed(struct destriptor_set *set) {
 static void update_compute_textures(struct destriptor_set *set) {
 	memset(&set->tex_desc, 0, sizeof(set->tex_desc));
 
-	int texture_count = write_compute_tex_descs(set->tex_desc);
+	write_compute_tex_descs(set->tex_desc);
 
 	VkWriteDescriptorSet writes[16];
 	memset(&writes, 0, sizeof(writes));
 
+	// only write the occupied texture-slots, at their actual bindings - the slots are not necessarily contiguous
+	int write_count = 0;
 	for (int i = 0; i < 16; ++i) {
-		writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[i].dstSet = set->set;
-		writes[i].dstBinding = i + 2;
-		writes[i].descriptorCount = 1;
-		writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		writes[i].pImageInfo = &set->tex_desc[i];
+		if (vulkanTextures[i] != NULL || vulkanRenderTargets[i] != NULL) {
+			writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writes[write_count].dstSet = set->set;
+			writes[write_count].dstBinding = i + 2;
+			writes[write_count].descriptorCount = 1;
+			writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+			writes[write_count].pImageInfo = &set->tex_desc[i];
+			++write_count;
+		}
 	}
 
-	if (vulkanTextures[0] != NULL || vulkanRenderTargets[0] != NULL) {
-		vkUpdateDescriptorSets(vk_ctx.device, texture_count, writes, 0, NULL);
+	if (write_count > 0) {
+		vkUpdateDescriptorSets(vk_ctx.device, write_count, writes, 0, NULL);
 	}
 }
 
@@ -1075,13 +1218,11 @@ static VkDescriptorSet get_compute_descriptor_set() {
 	VkDescriptorImageInfo tex_desc[16];
 	memset(&tex_desc, 0, sizeof(tex_desc));
 
-	int texture_count = 0;
 	for (int i = 0; i < 16; ++i) {
 		if (vulkanTextures[i] != NULL) {
 			// assert(vulkanSamplers[i] != VK_NULL_HANDLE);
 			tex_desc[i].sampler = VK_NULL_HANDLE; // vulkanSamplers[i];
 			tex_desc[i].imageView = vulkanTextures[i]->impl.texture.view;
-			texture_count++;
 		}
 		else if (vulkanRenderTargets[i] != NULL) {
 			tex_desc[i].sampler = vulkanSamplers[i];
@@ -1092,7 +1233,6 @@ static VkDescriptorSet get_compute_descriptor_set() {
 			else {
 				tex_desc[i].imageView = vulkanRenderTargets[i]->impl.sourceView;
 			}
-			texture_count++;
 		}
 		tex_desc[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 	}
@@ -1100,41 +1240,41 @@ static VkDescriptorSet get_compute_descriptor_set() {
 	VkWriteDescriptorSet writes[18];
 	memset(&writes, 0, sizeof(writes));
 
-	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[0].dstSet = descriptor_set;
-	writes[0].dstBinding = 0;
-	writes[0].descriptorCount = 1;
-	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
-	writes[0].pBufferInfo = &buffer_descs[0];
+	int write_count = 0;
 
-	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[1].dstSet = descriptor_set;
-	writes[1].dstBinding = 1;
-	writes[1].descriptorCount = 1;
-	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
-	writes[1].pBufferInfo = &buffer_descs[1];
+	if (vk_ctx.compute_uniform_buffer != NULL) {
+		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[0].dstSet = descriptor_set;
+		writes[0].dstBinding = 0;
+		writes[0].descriptorCount = 1;
+		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+		writes[0].pBufferInfo = &buffer_descs[0];
 
-	for (int i = 2; i < 18; ++i) {
-		writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[i].dstSet = descriptor_set;
-		writes[i].dstBinding = i;
-		writes[i].descriptorCount = 1;
-		writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		writes[i].pImageInfo = &tex_desc[i - 2];
+		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[1].dstSet = descriptor_set;
+		writes[1].dstBinding = 1;
+		writes[1].descriptorCount = 1;
+		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+		writes[1].pBufferInfo = &buffer_descs[1];
+
+		write_count = 2;
 	}
 
-	if (vulkanTextures[0] != NULL || vulkanRenderTargets[0] != NULL) {
-		if (vk_ctx.compute_uniform_buffer != NULL) {
-			vkUpdateDescriptorSets(vk_ctx.device, 2 + texture_count, writes, 0, NULL);
-		}
-		else {
-			vkUpdateDescriptorSets(vk_ctx.device, texture_count, writes + 2, 0, NULL);
+	// only write the occupied texture-slots, at their actual bindings - the slots are not necessarily contiguous
+	for (int i = 0; i < 16; ++i) {
+		if (vulkanTextures[i] != NULL || vulkanRenderTargets[i] != NULL) {
+			writes[write_count].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writes[write_count].dstSet = descriptor_set;
+			writes[write_count].dstBinding = i + 2;
+			writes[write_count].descriptorCount = 1;
+			writes[write_count].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+			writes[write_count].pImageInfo = &tex_desc[i];
+			++write_count;
 		}
 	}
-	else {
-		if (vk_ctx.compute_uniform_buffer != NULL) {
-			vkUpdateDescriptorSets(vk_ctx.device, 2, writes, 0, NULL);
-		}
+
+	if (write_count > 0) {
+		vkUpdateDescriptorSets(vk_ctx.device, write_count, writes, 0, NULL);
 	}
 
 	assert(compute_descriptor_sets_count + 1 < MAX_DESCRIPTOR_SETS);

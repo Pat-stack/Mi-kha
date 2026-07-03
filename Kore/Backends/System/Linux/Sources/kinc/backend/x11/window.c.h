@@ -41,8 +41,16 @@ int kinc_x11_window_create(kinc_window_options_t *win, kinc_framebuffer_options_
 	set_window_attribs.event_mask =
 	    KeyPressMask | KeyReleaseMask | ExposureMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | StructureNotifyMask | FocusChangeMask;
 	int screen = DefaultScreen(x11_ctx.display);
+#ifdef KINC_GLX
+	// the window has to be created with the visual of the GLX framebuffer-config (see glcontext.c.h)
+	XVisualInfo *kinc_glx_choose_visual(void);
+	XVisualInfo *visual_info = kinc_glx_choose_visual();
+	visual = visual_info->visual;
+	int depth = visual_info->depth;
+#else
 	visual = DefaultVisual(x11_ctx.display, screen);
 	int depth = DefaultDepth(x11_ctx.display, screen);
+#endif
 	set_window_attribs.colormap = xlib.XCreateColormap(x11_ctx.display, RootWindow(x11_ctx.display, screen), visual, AllocNone);
 	window->window = xlib.XCreateWindow(x11_ctx.display, RootWindow(x11_ctx.display, DefaultScreen(x11_ctx.display)), 0, 0, win->width, win->height, 0, depth,
 	                                    InputOutput, visual, CWBorderPixel | CWColormap | CWEventMask, &set_window_attribs);

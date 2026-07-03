@@ -82,6 +82,7 @@ bool kinc_x11_init() {
 	LOAD_FUN(X11, XInternAtoms)
 	LOAD_FUN(X11, XPending)
 	LOAD_FUN(X11, XFlush)
+	LOAD_FUN(X11, XSync)
 	LOAD_FUN(X11, XNextEvent)
 	LOAD_FUN(X11, XRefreshKeyboardMapping)
 	LOAD_FUN(X11, XwcLookupString)
