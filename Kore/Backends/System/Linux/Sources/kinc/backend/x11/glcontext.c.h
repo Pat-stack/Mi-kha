@@ -27,6 +27,15 @@ XVisualInfo *kinc_glx_choose_visual(void) {
 		return glx_visual_info;
 	}
 
+	// Steam sets DRI_PRIME on multi-GPU systems and can pick a GPU that is not driving the display,
+	// which routes every frame through a PRIME copy (tearing that no swap interval can fix, plus a
+	// performance hit). For GL we always want the display-GPU, which is Mesa's default, so the
+	// variable is dropped before the first GLX call initializes the DRI screen.
+	if (getenv("DRI_PRIME") != NULL && getenv("KINC_KEEP_DRI_PRIME") == NULL) {
+		kinc_log(KINC_LOG_LEVEL_INFO, "Ignoring DRI_PRIME=%s, rendering on the display-GPU (set KINC_KEEP_DRI_PRIME=1 to override).", getenv("DRI_PRIME"));
+		unsetenv("DRI_PRIME");
+	}
+
 	int dummy;
 	if (!glXQueryExtension(x11_ctx.display, &dummy, &dummy)) {
 		kinc_log(KINC_LOG_LEVEL_ERROR, "X server has no OpenGL GLX extension");
@@ -124,6 +133,10 @@ void kinc_glx_make_current(int window) {
 
 void kinc_glx_init_window(int window, bool vsync) {
 	kinc_glx_make_current(window);
+
+	if (window == 0) {
+		kinc_log(KINC_LOG_LEVEL_INFO, "OpenGL renderer: %s", (const char *)glGetString(GL_RENDERER));
+	}
 
 	glXSwapIntervalEXTProc glXSwapIntervalEXT = (glXSwapIntervalEXTProc)glXGetProcAddressARB((const GLubyte *)"glXSwapIntervalEXT");
 	if (glXSwapIntervalEXT != NULL) {
