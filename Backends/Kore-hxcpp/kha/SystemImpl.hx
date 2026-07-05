@@ -278,6 +278,9 @@ class SystemImpl {
 			#end
 		 */
 
+		// Destruir en este hilo (dueño del contexto GL) los objetos GL de las
+		// Images finalizadas por el GC en otros hilos.
+		Image._drainDeferredDeletes();
 		LoaderImpl.tick();
 		Scheduler.executeFrame();
 		System.render(framebuffers);

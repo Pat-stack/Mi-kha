@@ -32,6 +32,28 @@ enum KhaImageType {
 	kinc_g4_render_target_t renderTarget;
 	kinc_g4_texture_array_t textureArray;
 ")
+@:cppFileCode("
+// Cola de borrado diferido de objetos GL. Los finalizers del GC corren en el hilo
+// que dispara la colección (p.ej. un worker del thread pool), que no tiene contexto
+// GL corriente: llamar glDeleteTextures ahí es undefined (segfault en el driver de
+// Nvidia, no-op con fuga en Mesa). El finalizer solo encola copias por valor de los
+// structs (PODs de nombres GL) y el hilo de render las destruye una vez por frame
+// vía _drainDeferredDeletes(). Nada de esto puede alocar memoria del GC.
+#include <mutex>
+#include <vector>
+
+namespace {
+	enum KhaDeferredGlType { KhaDeferredTexture, KhaDeferredRenderTarget, KhaDeferredTextureArray };
+	struct KhaDeferredGlObject {
+		KhaDeferredGlType type;
+		kinc_g4_texture_t texture;
+		kinc_g4_render_target_t renderTarget;
+		kinc_g4_texture_array_t textureArray;
+	};
+	std::mutex kha_deferred_gl_mutex;
+	std::vector<KhaDeferredGlObject> kha_deferred_gl_queue;
+}
+")
 class Image implements Canvas implements Resource {
 	var myFormat: TextureFormat;
 	var readable: Bool;
@@ -174,10 +196,54 @@ class Image implements Canvas implements Resource {
 
 	@:functionCode("
 		if (image->imageType != KhaImageTypeNone) {
-			image->unload();
+			KhaDeferredGlObject obj;
+			if (image->imageType == KhaImageTypeTexture) {
+				obj.type = KhaDeferredTexture;
+				obj.texture = image->texture;
+			}
+			else if (image->imageType == KhaImageTypeRenderTarget) {
+				obj.type = KhaDeferredRenderTarget;
+				obj.renderTarget = image->renderTarget;
+			}
+			else {
+				obj.type = KhaDeferredTextureArray;
+				obj.textureArray = image->textureArray;
+			}
+			{
+				std::lock_guard<std::mutex> lock(kha_deferred_gl_mutex);
+				kha_deferred_gl_queue.push_back(obj);
+			}
+			// free() del lado CPU sí es seguro en cualquier hilo
+			if (image->ownsImageData) {
+				free(image->imageData);
+			}
+			image->imageData = NULL;
+			image->imageType = KhaImageTypeNone;
 		}
 	")
 	@:void static function finalize(image: Image): Void {}
+
+	@:functionCode("
+		std::vector<KhaDeferredGlObject> local;
+		{
+			std::lock_guard<std::mutex> lock(kha_deferred_gl_mutex);
+			local.swap(kha_deferred_gl_queue);
+		}
+		for (size_t i = 0; i < local.size(); ++i) {
+			switch (local[i].type) {
+				case KhaDeferredTexture:
+					kinc_g4_texture_destroy(&local[i].texture);
+					break;
+				case KhaDeferredRenderTarget:
+					kinc_g4_render_target_destroy(&local[i].renderTarget);
+					break;
+				case KhaDeferredTextureArray:
+					kinc_g4_texture_array_destroy(&local[i].textureArray);
+					break;
+			}
+		}
+	")
+	@:noCompletion public static function _drainDeferredDeletes(): Void {}
 
 	static function getRenderTargetFormat(format: TextureFormat): Int {
 		switch (format) {

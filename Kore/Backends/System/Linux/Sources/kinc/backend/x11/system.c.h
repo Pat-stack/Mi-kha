@@ -205,12 +205,17 @@ bool kinc_x11_init() {
 			buffer[j] = tolower(buffer[j]);
 		}
 
-		if (strstr(buffer, "stylus") || strstr(buffer, "pen") || strstr(buffer, "wacom")) {
-			init_pen_device(&devices[i], &x11_ctx.pen, false);
-		}
-		if (strstr(buffer, "eraser")) {
-			init_pen_device(&devices[i], &x11_ctx.eraser, true);
-		}
+		// Pen/eraser detection disabled: the game does not use digital pens, and init_pen_device
+		// walks device->num_classes over info->inputclassinfo (two different sources) which reads
+		// out of bounds and segfaults on some styluses/drivers. Leaving pen.id/eraser.id at -1
+		// makes all downstream pen handling skip safely. Re-enable only after fixing the class walk.
+		(void)init_pen_device;
+		// if (strstr(buffer, "stylus") || strstr(buffer, "pen") || strstr(buffer, "wacom")) {
+		// 	init_pen_device(&devices[i], &x11_ctx.pen, false);
+		// }
+		// if (strstr(buffer, "eraser")) {
+		// 	init_pen_device(&devices[i], &x11_ctx.eraser, true);
+		// }
 	}
 
 	if (devices != NULL) {
