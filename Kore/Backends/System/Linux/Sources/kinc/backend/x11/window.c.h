@@ -31,8 +31,21 @@ int kinc_x11_window_create(kinc_window_options_t *win, kinc_framebuffer_options_
 
 	struct kinc_x11_window *window = &x11_ctx.windows[window_index];
 	window->window_index = window_index;
-	window->width = win->width;
-	window->height = win->height;
+
+	// When starting directly in fullscreen, create the window already at the
+	// display's resolution: _NET_WM_STATE_FULLSCREEN is applied by the window
+	// manager *after* mapping, so a window created at a smaller size would get
+	// resized afterwards (visible resolution jump on startup).
+	int window_width = win->width;
+	int window_height = win->height;
+	if (win->mode == KINC_WINDOW_MODE_FULLSCREEN || win->mode == KINC_WINDOW_MODE_EXCLUSIVE_FULLSCREEN) {
+		int display_index = win->display_index >= 0 ? win->display_index : kinc_primary_display();
+		kinc_display_mode_t display_mode = kinc_display_current_mode(display_index);
+		window_width = display_mode.width;
+		window_height = display_mode.height;
+	}
+	window->width = window_width;
+	window->height = window_height;
 
 	Visual *visual = NULL;
 	XSetWindowAttributes set_window_attribs = {0};
@@ -52,7 +65,7 @@ int kinc_x11_window_create(kinc_window_options_t *win, kinc_framebuffer_options_
 	int depth = DefaultDepth(x11_ctx.display, screen);
 #endif
 	set_window_attribs.colormap = xlib.XCreateColormap(x11_ctx.display, RootWindow(x11_ctx.display, screen), visual, AllocNone);
-	window->window = xlib.XCreateWindow(x11_ctx.display, RootWindow(x11_ctx.display, DefaultScreen(x11_ctx.display)), 0, 0, win->width, win->height, 0, depth,
+	window->window = xlib.XCreateWindow(x11_ctx.display, RootWindow(x11_ctx.display, DefaultScreen(x11_ctx.display)), 0, 0, window_width, window_height, 0, depth,
 	                                    InputOutput, visual, CWBorderPixel | CWColormap | CWEventMask, &set_window_attribs);
 
 	static char nameClass[256];
@@ -69,8 +82,18 @@ int kinc_x11_window_create(kinc_window_options_t *win, kinc_framebuffer_options_
 	window->xInputContext = xlib.XCreateIC(window->xInputMethod, XNInputStyle, XIMPreeditNothing | XIMStatusNothing, XNClientWindow, window->window, NULL);
 	xlib.XSetICFocus(window->xInputContext);
 
-	window->mode = KINC_WINDOW_MODE_WINDOW;
-	kinc_x11_window_change_mode(window_index, win->mode);
+	// EWMH: for a window that is not mapped yet, fullscreen must be requested by
+	// setting the _NET_WM_STATE *property* before mapping; the ClientMessage that
+	// kinc_x11_window_change_mode sends is only honored for already-managed
+	// windows (GNOME ignores it during creation).
+	if (win->mode == KINC_WINDOW_MODE_FULLSCREEN || win->mode == KINC_WINDOW_MODE_EXCLUSIVE_FULLSCREEN) {
+		window->mode = KINC_WINDOW_MODE_FULLSCREEN;
+		Atom fullscreen_atom = x11_ctx.atoms.NET_WM_STATE_FULLSCREEN;
+		xlib.XChangeProperty(x11_ctx.display, window->window, x11_ctx.atoms.NET_WM_STATE, XA_ATOM, 32, PropModeReplace, (unsigned char *)&fullscreen_atom, 1);
+	}
+	else {
+		window->mode = KINC_WINDOW_MODE_WINDOW;
+	}
 
 	xlib.XMapWindow(x11_ctx.display, window->window);
 
