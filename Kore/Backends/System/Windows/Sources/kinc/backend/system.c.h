@@ -1131,10 +1131,13 @@ bool kinc_internal_handle_messages() {
 				gamepadFound = true;
 
 				float newaxes[6];
+				// Y negada: el layout canónico del juego usa convención de
+				// pantalla (+Y = abajo), igual que el backend evdev de Linux.
+				// XInput reporta sThumb*Y positivo hacia arriba.
 				newaxes[0] = state.Gamepad.sThumbLX / 32768.0f;
-				newaxes[1] = state.Gamepad.sThumbLY / 32768.0f;
+				newaxes[1] = -state.Gamepad.sThumbLY / 32768.0f;
 				newaxes[2] = state.Gamepad.sThumbRX / 32768.0f;
-				newaxes[3] = state.Gamepad.sThumbRY / 32768.0f;
+				newaxes[3] = -state.Gamepad.sThumbRY / 32768.0f;
 				newaxes[4] = state.Gamepad.bLeftTrigger / 255.0f;
 				newaxes[5] = state.Gamepad.bRightTrigger / 255.0f;
 				for (int i2 = 0; i2 < 6; ++i2) {
@@ -1168,9 +1171,12 @@ bool kinc_internal_handle_messages() {
 				}
 			}
 			else {
-				if (handleDirectInputPad(i)) {
-					gamepadFound = true;
-				}
+				// DirectInput deshabilitado (ver comentario junto a
+				// initializeDirectInput): sin dispositivos DI abiertos,
+				// handleDirectInputPad(i) siempre devolvería false.
+				// if (handleDirectInputPad(i)) {
+				// 	gamepadFound = true;
+				// }
 			}
 		}
 	}
@@ -1289,7 +1295,9 @@ void kinc_login(void) {}
 void kinc_unlock_achievement(int id) {}
 
 bool kinc_gamepad_connected(int num) {
-	return isXInputGamepad(num) || isDirectInputGamepad(num);
+	// Solo XInput: DirectInput está deshabilitado (di_pads queda vacío, así
+	// que isDirectInputGamepad daría false de todas formas).
+	return isXInputGamepad(num);
 }
 
 void kinc_gamepad_rumble(int gamepad, float left, float right) {
@@ -1409,7 +1417,11 @@ int kinc_init(const char *name, int width, int height, kinc_window_options_t *wi
 
 	int window = kinc_window_create(win, frame);
 	loadXInput();
-	initializeDirectInput();
+	// DirectInput deshabilitado: el path estaba a medio implementar (solo lee
+	// los ejes 0-1, botones en orden arbitrario del dispositivo) y bajo Steam
+	// Input duplicaría un mando remapeado (el físico por DirectInput + el
+	// virtual por XInput). Política: XInput nativo + Steam Input para el resto.
+	// initializeDirectInput();
 
 	return window;
 }
